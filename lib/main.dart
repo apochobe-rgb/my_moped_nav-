@@ -39,8 +39,8 @@ class _MapPageState extends State<MapPage> {
   double _speed = 0.0;
   double _heading = 0.0; 
   String _distStr = "--";
-  String _etaTime = "--"; // 到着時刻
-  String _durationStr = "--"; // 所要時間
+  String _etaTime = "--"; 
+  String _durationStr = "--"; 
   
   final MapController _mapController = MapController();
   final TextEditingController _searchController = TextEditingController();
@@ -67,7 +67,7 @@ class _MapPageState extends State<MapPage> {
         
         if (_isNav) {
           if (_autoFollow) _updateCamera();
-          _checkReroute(); // 経路外れチェック
+          _checkReroute(); 
           _updateProgress();
         }
       });
@@ -80,7 +80,6 @@ class _MapPageState extends State<MapPage> {
     _mapController.move(_currentPos, zoom);
   }
 
-  // 経路から外れたら再計算（簡易実装：直近の点から50m以上離れたら）
   void _checkReroute() {
     if (_route.isEmpty || _dest == null) return;
     double minDev = _route.map((rp) => const Distance().as(LengthUnit.Meter, _currentPos, rp)).reduce(math.min);
@@ -180,19 +179,15 @@ class _MapPageState extends State<MapPage> {
             ],
           ),
 
-          // 案内開始前のみ検索バーを表示
           if (!_isNav) Positioned(top: 40, left: 10, right: 10, child: _buildSearchBox()),
 
-          // 下部情報バー
           if (_isNav) Positioned(bottom: 0, left: 0, right: 0, child: _buildBottomNavInfo()),
           
-          // 右側：位置復帰ボタン
-          if (_isNav && !_autoFollow) Positioned(right: 15, bottom: 100, child: FloatingActionButton.small(
+          if (_isNav && !_autoFollow) Positioned(right: 15, bottom: 120, child: FloatingActionButton.small(
             onPressed: () => setState(() => _autoFollow = true),
             child: const Icon(Icons.my_location),
           )),
 
-          // 目的地確認カード
           if (_dest != null && !_isNav) Positioned(bottom: 20, left: 15, right: 15, child: _buildConfirmCard()),
         ],
       ),
@@ -232,17 +227,20 @@ class _MapPageState extends State<MapPage> {
           ]),
           Text("残り $_distStr", style: const TextStyle(color: Colors.blueGrey, fontSize: 14)),
         ])),
-        _speedDisplay(),
+        Column(children: [
+          Text(_speed.toStringAsFixed(0), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.orange)),
+          const Text("km/h", style: TextStyle(fontSize: 10, color: Colors.orange)),
+        ]),
         const SizedBox(width: 15),
-        IconButton.filled(onPressed: () => setState(() => _isNav = false), icon: const Icon(Icons.close), backgroundColor: Colors.red),
+        // エラー修正箇所：styleパラメータを使用
+        IconButton.filled(
+          onPressed: () => setState(() => _isNav = false), 
+          icon: const Icon(Icons.close),
+          style: IconButton.styleFrom(backgroundColor: Colors.red),
+        ),
       ]),
     );
   }
-
-  Widget _speedDisplay() => Column(children: [
-    Text(_speed.toStringAsFixed(0), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.orange)),
-    const Text("km/h", style: TextStyle(fontSize: 10, color: Colors.orange)),
-  ]);
 
   Widget _buildConfirmCard() {
     return Card(
