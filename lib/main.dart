@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:flutter_typeahead/flutter_typeahead.dart';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'package:intl/intl.dart';
 
 void main() => runApp(const MopedNavApp());
 
@@ -36,11 +37,13 @@ class _MapPageState extends State<MapPage> {
   bool _isNav = false;
   bool _autoFollow = true;
   double _speed = 0.0;
-  double _heading = 0.0; // 進行方向
+  double _heading = 0.0; 
   String _distStr = "--";
-  String _eta = "--";
+  String _etaTime = "--"; // 到着時刻
+  String _durationStr = "--"; // 所要時間
   
   final MapController _mapController = MapController();
+  final TextEditingController _searchController = TextEditingController();
 
   @override
   void initState() {
@@ -53,37 +56,63 @@ class _MapPageState extends State<MapPage> {
     Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 1, // 1m単位で更新して滑らかに
+        distanceFilter: 2, 
       ),
     ).listen((Position p) {
       if (!mounted) return;
       setState(() {
         _currentPos = LatLng(p.latitude, p.longitude);
         _speed = p.speed * 3.6;
-        if (p.heading != 0) _heading = p.heading; // 進行方向を取得
+        if (p.heading != 0) _heading = p.heading;
         
-        if (_isNav && _autoFollow) {
-          _updateCamera();
+        if (_isNav) {
+          if (_autoFollow) _updateCamera();
+          _checkReroute(); // 経路外れチェック
+          _updateProgress();
         }
-        if (_isNav) _updateProgress();
       });
     });
   }
 
   void _updateCamera() {
-    // 進行方向を上にする(rotate)、速度に合わせてズーム
     double zoom = 17.5 - math.min(2.0, _speed / 25.0);
-    _mapController.rotate(-_heading); // 地図を回転
+    _mapController.rotate(-_heading); 
     _mapController.move(_currentPos, zoom);
   }
 
-  // ルート上の信号だけを抽出
+  // 経路から外れたら再計算（簡易実装：直近の点から50m以上離れたら）
+  void _checkReroute() {
+    if (_route.isEmpty || _dest == null) return;
+    double minDev = _route.map((rp) => const Distance().as(LengthUnit.Meter, _currentPos, rp)).reduce(math.min);
+    if (minDev > 50) {
+      _getRoute(_dest!, fitBounds: false);
+    }
+  }
+
+  Future<void> _getRoute(LatLng dest, {bool fitBounds = true}) async {
+    final url = 'https://router.project-osrm.org/route/v1/driving/${_currentPos.longitude},${_currentPos.latitude};${dest.longitude},${dest.latitude}?overview=full&geometries=geojson';
+    try {
+      final res = await http.get(Uri.parse(url));
+      if (res.statusCode == 200) {
+        final List coords = json.decode(res.body)['routes'][0]['geometry']['coordinates'];
+        setState(() {
+          _route = coords.map((c) => LatLng(c[1].toDouble(), c[0].toDouble())).toList();
+        });
+        
+        if (fitBounds) {
+          final bounds = LatLngBounds.fromPoints(_route);
+          _mapController.fitCamera(CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(50)));
+        }
+        _fetchRouteSignals();
+        _updateProgress();
+      }
+    } catch (_) {}
+  }
+
   Future<void> _fetchRouteSignals() async {
     if (_route.isEmpty) return;
-    // ルートの中間地点から信号データを取得
     final p = _route[(_route.length / 2).floor()];
     final url = 'https://overpass-api.de/api/interpreter?data=${Uri.encodeComponent('[out:json];node(around:2000,${p.latitude},${p.longitude})["highway"="traffic_signals"];out;') }';
-    
     try {
       final res = await http.get(Uri.parse(url));
       if (res.statusCode == 200) {
@@ -91,32 +120,14 @@ class _MapPageState extends State<MapPage> {
         List<Marker> filtered = [];
         for (var e in elements) {
           LatLng sPos = LatLng(e['lat'], e['lon']);
-          // ルート上のいずれかの点から20m以内の信号だけを表示
-          bool isOnRoute = _route.any((rp) => const Distance().as(LengthUnit.Meter, rp, sPos) < 20);
+          bool isOnRoute = _route.any((rp) => const Distance().as(LengthUnit.Meter, rp, sPos) < 15);
           if (isOnRoute) {
-            filtered.add(Marker(
-              point: sPos,
-              width: 30, height: 30,
-              child: const Text('🚥', style: TextStyle(fontSize: 20)),
-            ));
+            filtered.add(Marker(point: sPos, width: 30, height: 30, child: const Text('🚥', style: TextStyle(fontSize: 18))));
           }
         }
         setState(() => _signals = filtered);
       }
     } catch (_) {}
-  }
-
-  Future<void> _getRoute(LatLng dest) async {
-    final url = 'https://router.project-osrm.org/route/v1/driving/${_currentPos.longitude},${_currentPos.latitude};${dest.longitude},${dest.latitude}?overview=full&geometries=geojson';
-    final res = await http.get(Uri.parse(url));
-    if (res.statusCode == 200) {
-      final List coords = json.decode(res.body)['routes'][0]['geometry']['coordinates'];
-      setState(() {
-        _route = coords.map((c) => LatLng(c[1].toDouble(), c[0].toDouble())).toList();
-      });
-      _fetchRouteSignals();
-      _updateProgress();
-    }
   }
 
   void _updateProgress() {
@@ -125,9 +136,13 @@ class _MapPageState extends State<MapPage> {
     for (int i = 0; i < _route.length - 1; i++) {
       meters += const Distance().as(LengthUnit.Meter, _route[i], _route[i + 1]);
     }
+    int minutes = (meters / (25 * 1000) * 60).round();
+    DateTime arrival = DateTime.now().add(Duration(minutes: minutes));
+    
     setState(() {
       _distStr = meters > 1000 ? "${(meters / 1000).toStringAsFixed(1)}km" : "${meters.round()}m";
-      _eta = "${(meters / (25 * 1000) * 60).round()}分";
+      _durationStr = "$minutes分";
+      _etaTime = DateFormat('H:mm').format(arrival);
     });
   }
 
@@ -141,57 +156,55 @@ class _MapPageState extends State<MapPage> {
             options: MapOptions(
               initialCenter: _currentPos,
               initialZoom: 16.0,
-              onTap: (_, p) => _showPreview(p),
+              onTap: (_, p) { if(!_isNav) _showPreview(p); },
               onPositionChanged: (pos, hasGesture) {
-                if (hasGesture) setState(() => _autoFollow = false);
+                if (hasGesture && _isNav) setState(() => _autoFollow = false);
               },
             ),
             children: [
               TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
-              if (_route.isNotEmpty)
-                PolylineLayer(polylines: [
-                  Polyline(points: _route, color: Colors.blue.withOpacity(0.7), strokeWidth: 8),
-                ]),
+              if (_route.isNotEmpty) PolylineLayer(polylines: [
+                Polyline(points: _route, color: Colors.blue.withOpacity(0.8), strokeWidth: 8),
+              ]),
               MarkerLayer(markers: [
                 ..._signals,
-                // 自車アイコン（進行方向に回転）
                 Marker(
                   point: _currentPos,
                   child: Transform.rotate(
                     angle: _heading * (math.pi / 180),
-                    child: const Icon(Icons.navigation, color: Colors.blue, size: 40),
+                    child: const Icon(Icons.navigation, color: Colors.blue, size: 45),
                   ),
                 ),
-                if (_dest != null) Marker(point: _dest!, child: const Icon(Icons.location_on, color: Colors.red, size: 40)),
+                if (_dest != null) Marker(point: _dest!, child: const Icon(Icons.location_on, color: Colors.red, size: 45)),
               ]),
             ],
           ),
 
-          // 上部：透過検索バー
-          Positioned(top: 40, left: 10, right: 10, child: _buildCompactSearch()),
+          // 案内開始前のみ検索バーを表示
+          if (!_isNav) Positioned(top: 40, left: 10, right: 10, child: _buildSearchBox()),
 
-          // 案内中の情報表示（フローティング）
-          if (_isNav) Positioned(top: 110, left: 10, right: 10, child: _buildNavInfo()),
-
-          // 右下：操作ボタン群
-          Positioned(right: 15, bottom: 30, child: Column(children: [
-            _sideBtn(Icons.my_location, () { setState(() => _autoFollow = true); _updateCamera(); }, _autoFollow ? Colors.blue : Colors.grey),
-            const SizedBox(height: 10),
-            if (_isNav) _sideBtn(Icons.stop, () => setState(() => _isNav = false), Colors.red),
-          ])),
+          // 下部情報バー
+          if (_isNav) Positioned(bottom: 0, left: 0, right: 0, child: _buildBottomNavInfo()),
           
-          // 目的地プレビュー（カード）
-          if (_dest != null && !_isNav) Positioned(bottom: 20, left: 15, right: 15, child: _buildStartCard()),
+          // 右側：位置復帰ボタン
+          if (_isNav && !_autoFollow) Positioned(right: 15, bottom: 100, child: FloatingActionButton.small(
+            onPressed: () => setState(() => _autoFollow = true),
+            child: const Icon(Icons.my_location),
+          )),
+
+          // 目的地確認カード
+          if (_dest != null && !_isNav) Positioned(bottom: 20, left: 15, right: 15, child: _buildConfirmCard()),
         ],
       ),
     );
   }
 
-  Widget _buildCompactSearch() {
+  Widget _buildSearchBox() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 15),
-      decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(30), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10)]),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(30), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10)]),
       child: TypeAheadField(
+        controller: _searchController,
         suggestionsCallback: (p) async {
           final res = await http.get(Uri.parse('https://nominatim.openstreetmap.org/search?q=${Uri.encodeComponent(p)}&format=json&limit=5&accept-language=ja'));
           return json.decode(res.body) as List;
@@ -199,47 +212,59 @@ class _MapPageState extends State<MapPage> {
         itemBuilder: (context, s) => ListTile(title: Text(s['display_name'].split(',')[0])),
         onSelected: (s) {
           final p = LatLng(double.parse(s['lat']), double.parse(s['lon']));
-          setState(() { _dest = p; _autoFollow = false; });
-          _mapController.move(p, 16);
-          _getRoute(p);
+          _showPreview(p);
         },
         builder: (context, ctrl, node) => TextField(controller: ctrl, focusNode: node, decoration: const InputDecoration(hintText: '目的地を検索', border: InputBorder.none)),
       ),
     );
   }
 
-  Widget _buildNavInfo() {
+  Widget _buildBottomNavInfo() {
     return Container(
-      padding: const EdgeInsets.all(15),
-      decoration: BoxDecoration(color: Colors.black.withOpacity(0.7), borderRadius: BorderRadius.circular(15)),
-      child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-        _infoTile("到着", _eta, Colors.white),
-        _infoTile("距離", _distStr, Colors.white),
-        _infoTile("時速", "${_speed.toStringAsFixed(0)}km", Colors.orangeAccent),
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 25),
+      decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(20)), boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10)]),
+      child: Row(children: [
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+            Text(_etaTime, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+            const SizedBox(width: 8),
+            Text("($_durationStr)", style: const TextStyle(fontSize: 16, color: Colors.grey)),
+          ]),
+          Text("残り $_distStr", style: const TextStyle(color: Colors.blueGrey, fontSize: 14)),
+        ])),
+        _speedDisplay(),
+        const SizedBox(width: 15),
+        IconButton.filled(onPressed: () => setState(() => _isNav = false), icon: const Icon(Icons.close), backgroundColor: Colors.red),
       ]),
     );
   }
 
-  Widget _buildStartCard() {
+  Widget _speedDisplay() => Column(children: [
+    Text(_speed.toStringAsFixed(0), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.orange)),
+    const Text("km/h", style: TextStyle(fontSize: 10, color: Colors.orange)),
+  ]);
+
+  Widget _buildConfirmCard() {
     return Card(
+      elevation: 8,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: Padding(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const Text("目的地に設定しました", style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 10),
-        SizedBox(width: double.infinity, child: ElevatedButton(
-          onPressed: () => setState(() => _isNav = true),
+        const Text("経路を確認", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 5),
+        Text("到着予定: $_etaTime ($_durationStr)", style: const TextStyle(color: Colors.grey)),
+        const SizedBox(height: 15),
+        SizedBox(width: double.infinity, height: 50, child: ElevatedButton.icon(
+          onPressed: () {
+            setState(() { _isNav = true; _autoFollow = true; });
+            _updateCamera();
+          },
+          icon: const Icon(Icons.navigation),
+          label: const Text("案内を開始", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white),
-          child: const Text("案内開始"),
         ))
       ])),
     );
   }
-
-  Widget _infoTile(String l, String v, Color c) => Column(children: [
-    Text(l, style: const TextStyle(color: Colors.white70, fontSize: 12)),
-    Text(v, style: TextStyle(color: c, fontSize: 22, fontWeight: FontWeight.bold)),
-  ]);
-
-  Widget _sideBtn(IconData i, VoidCallback o, Color c) => FloatingActionButton.small(onPressed: o, backgroundColor: Colors.white, child: Icon(i, color: c));
 
   void _showPreview(LatLng p) {
     setState(() { _dest = p; _isNav = false; });
