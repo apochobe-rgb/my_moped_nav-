@@ -65,8 +65,10 @@ class _MapPageState extends State<MapPage> {
         _speed = p.speed * 3.6;
         if (p.heading != 0) _heading = p.heading;
         
+        if (_autoFollow) {
+          _updateCamera();
+        }
         if (_isNav) {
-          if (_autoFollow) _updateCamera();
           _checkReroute(); 
           _updateProgress();
         }
@@ -75,8 +77,10 @@ class _MapPageState extends State<MapPage> {
   }
 
   void _updateCamera() {
-    double zoom = 17.5 - math.min(2.0, _speed / 25.0);
-    _mapController.rotate(-_heading); 
+    double zoom = _isNav ? (17.5 - math.min(2.0, _speed / 25.0)) : 16.0;
+    // ナビ中のみ進行方向を上にする（地図を回転させる）
+    double rotation = _isNav ? -_heading : 0.0;
+    _mapController.rotate(rotation); 
     _mapController.move(_currentPos, zoom);
   }
 
@@ -100,7 +104,7 @@ class _MapPageState extends State<MapPage> {
         
         if (fitBounds) {
           final bounds = LatLngBounds.fromPoints(_route);
-          _mapController.fitCamera(CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(50)));
+          _mapController.fitCamera(CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(70)));
         }
         _fetchRouteSignals();
         _updateProgress();
@@ -157,7 +161,7 @@ class _MapPageState extends State<MapPage> {
               initialZoom: 16.0,
               onTap: (_, p) { if(!_isNav) _showPreview(p); },
               onPositionChanged: (pos, hasGesture) {
-                if (hasGesture && _isNav) setState(() => _autoFollow = false);
+                if (hasGesture) setState(() => _autoFollow = false);
               },
             ),
             children: [
@@ -179,15 +183,27 @@ class _MapPageState extends State<MapPage> {
             ],
           ),
 
+          // 案内開始前のみ検索バーを表示
           if (!_isNav) Positioned(top: 40, left: 10, right: 10, child: _buildSearchBox()),
 
+          // 下部情報バー（ナビ中）
           if (_isNav) Positioned(bottom: 0, left: 0, right: 0, child: _buildBottomNavInfo()),
           
-          if (_isNav && !_autoFollow) Positioned(right: 15, bottom: 120, child: FloatingActionButton.small(
-            onPressed: () => setState(() => _autoFollow = true),
-            child: const Icon(Icons.my_location),
-          )),
+          // 右側：現在地に戻るボタン（常時表示）
+          Positioned(
+            right: 15, 
+            bottom: _isNav ? 120 : (_dest != null ? 220 : 30), 
+            child: FloatingActionButton(
+              onPressed: () {
+                setState(() => _autoFollow = true);
+                _updateCamera();
+              },
+              backgroundColor: Colors.white,
+              child: Icon(Icons.my_location, color: _autoFollow ? Colors.blue : Colors.grey),
+            ),
+          ),
 
+          // 目的地確認カード（経路確認中）
           if (_dest != null && !_isNav) Positioned(bottom: 20, left: 15, right: 15, child: _buildConfirmCard()),
         ],
       ),
@@ -232,9 +248,13 @@ class _MapPageState extends State<MapPage> {
           const Text("km/h", style: TextStyle(fontSize: 10, color: Colors.orange)),
         ]),
         const SizedBox(width: 15),
-        // エラー修正箇所：styleパラメータを使用
         IconButton.filled(
-          onPressed: () => setState(() => _isNav = false), 
+          onPressed: () {
+            setState(() {
+              _isNav = false;
+              _mapController.rotate(0); // 回転をリセット
+            });
+          }, 
           icon: const Icon(Icons.close),
           style: IconButton.styleFrom(backgroundColor: Colors.red),
         ),
@@ -246,21 +266,30 @@ class _MapPageState extends State<MapPage> {
     return Card(
       elevation: 8,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const Text("経路を確認", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 5),
-        Text("到着予定: $_etaTime ($_durationStr)", style: const TextStyle(color: Colors.grey)),
-        const SizedBox(height: 15),
-        SizedBox(width: double.infinity, height: 50, child: ElevatedButton.icon(
-          onPressed: () {
-            setState(() { _isNav = true; _autoFollow = true; });
-            _updateCamera();
-          },
-          icon: const Icon(Icons.navigation),
-          label: const Text("案内を開始", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white),
-        ))
-      ])),
+      child: Stack(
+        children: [
+          Padding(padding: const EdgeInsets.all(20), child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text("経路を確認", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 5),
+            Text("到着予定: $_etaTime ($_durationStr)", style: const TextStyle(color: Colors.grey)),
+            const SizedBox(height: 15),
+            SizedBox(width: double.infinity, height: 50, child: ElevatedButton.icon(
+              onPressed: () {
+                setState(() { _isNav = true; _autoFollow = true; });
+                _updateCamera();
+              },
+              icon: const Icon(Icons.navigation),
+              label: const Text("案内を開始", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white),
+            ))
+          ])),
+          // 閉じるボタン
+          Positioned(right: 5, top: 5, child: IconButton(
+            icon: const Icon(Icons.cancel, color: Colors.grey),
+            onPressed: () => setState(() { _dest = null; _route = []; _signals = []; }),
+          )),
+        ],
+      ),
     );
   }
 
